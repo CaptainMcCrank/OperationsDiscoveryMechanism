@@ -1,0 +1,1 @@
+- [ ] Iterate this project to work on ai.local for a Pop!_OS Linux system
