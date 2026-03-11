@@ -1,1 +1,3 @@
-- [ ] Iterate this project to work on ai.local for a Pop!_OS Linux system
+- [x] Iterate this project to work on ai.local for a Pop!_OS Linux system
+      Completed: Added linux_system_info.py and test_linux_system_info.py (22 tests)
+      Tested on: Pop!_OS 22.04 LTS, AMD RYZEN AI MAX+ 395, 32 threads, 30GB RAM
