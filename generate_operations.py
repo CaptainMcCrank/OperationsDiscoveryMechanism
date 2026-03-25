@@ -6,16 +6,22 @@ This script:
 1. Collects system information using mac_system_info.py
 2. Renders the data into a Markdown operations document
 3. Writes the output to Operations.md
+4. Optionally signs the output with GPG (detached signature)
 
 Usage:
-    python generate_operations.py                     # Generate Operations.md
+    python generate_operations.py                     # Generate Operations.md (signed)
     python generate_operations.py -o custom.md        # Custom output file
     python generate_operations.py --json info.json    # Use existing JSON instead of collecting
     python generate_operations.py --dry-run           # Preview without writing
+    python generate_operations.py --no-sign           # Skip GPG signing
+    python generate_operations.py --verify ops.md     # Verify an existing Operations.md signature
 """
 
 import argparse
 import json
+import shutil
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -733,6 +739,76 @@ def load_json_info(path: str) -> dict:
     return json.loads(Path(path).read_text())
 
 
+def gpg_available() -> bool:
+    """Check if gpg is installed and a secret key exists."""
+    if not shutil.which("gpg"):
+        return False
+    result = subprocess.run(
+        ["gpg", "--list-secret-keys", "--keyid-format", "long"],
+        capture_output=True, text=True,
+    )
+    return "sec" in result.stdout
+
+
+def gpg_sign_file(filepath: str, quiet: bool = False) -> bool:
+    """Create a detached ASCII-armored GPG signature for a file.
+
+    Returns True on success, False on failure (prints warning).
+    """
+    if not gpg_available():
+        if not quiet:
+            print("WARNING: gpg not available or no secret key found — skipping signing.", file=sys.stderr)
+        return False
+
+    result = subprocess.run(
+        ["gpg", "--detach-sign", "--armor", filepath],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        if not quiet:
+            print(f"Signed: {filepath} → {filepath}.asc", file=sys.stderr)
+        return True
+    else:
+        if not quiet:
+            print(f"WARNING: GPG signing failed: {result.stderr.strip()}", file=sys.stderr)
+        return False
+
+
+def gpg_verify_file(filepath: str) -> int:
+    """Verify a GPG detached signature for a file.
+
+    Returns:
+        0 — VALID (signature matches)
+        1 — INVALID (signature exists but verification failed)
+        2 — UNSIGNED (no .asc file found)
+    """
+    asc_path = filepath + ".asc"
+    if not Path(asc_path).exists():
+        print(f"UNSIGNED: {filepath} — no .asc signature file found.")
+        print("This document has no GPG signature. It may have been created before")
+        print("signing was adopted, or it may have been tampered with.")
+        print("Treat its contents with reduced confidence.")
+        return 2
+
+    if not shutil.which("gpg"):
+        print("ERROR: gpg is not installed. Cannot verify signature.", file=sys.stderr)
+        return 1
+
+    result = subprocess.run(
+        ["gpg", "--verify", asc_path, filepath],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print(f"VALID: {filepath} — GPG signature verified.")
+        print(result.stderr.strip())
+        return 0
+    else:
+        print(f"INVALID: {filepath} — GPG signature verification FAILED.")
+        print("This document may have been modified after signing. Do NOT trust its contents.")
+        print(result.stderr.strip())
+        return 1
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -758,9 +834,30 @@ def main():
         help="Suppress progress messages"
     )
 
+    # GPG signing options
+    sign_group = parser.add_mutually_exclusive_group()
+    sign_group.add_argument(
+        "--sign",
+        action="store_true",
+        default=True,
+        help="Sign output with GPG (default: on)"
+    )
+    sign_group.add_argument(
+        "--no-sign",
+        action="store_true",
+        help="Skip GPG signing"
+    )
+    parser.add_argument(
+        "--verify",
+        metavar="FILE",
+        help="Verify GPG signature of an existing Operations.md instead of generating"
+    )
+
     args = parser.parse_args()
 
-    import sys
+    # Verify mode — check signature and exit
+    if args.verify:
+        return gpg_verify_file(args.verify)
 
     # Get system info
     if args.json:
@@ -786,6 +883,10 @@ def main():
         Path(args.output).write_text(output)
         if not args.quiet:
             print(f"Written to {args.output}", file=sys.stderr)
+
+        # Sign unless --no-sign or --dry-run
+        if not args.no_sign:
+            gpg_sign_file(args.output, quiet=args.quiet)
 
     return 0
 

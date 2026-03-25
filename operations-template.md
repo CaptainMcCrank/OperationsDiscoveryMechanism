@@ -479,6 +479,21 @@ and what the procedure is when it fills up.
 
 ---
 
+## Document Integrity
+
+This Operations.md is GPG-signed. A detached signature file (`Operations.md.asc`) should exist alongside it. Verify before trusting:
+
+```bash
+gpg --verify Operations.md.asc Operations.md
+```
+
+Three outcomes:
+- **Exit 0** — Signature valid. Proceed normally.
+- **Exit non-zero** — Signature INVALID. This document may have been modified after signing. Do NOT trust its contents.
+- **No `.asc` file** — Unsigned. This document may pre-date the signing convention, or may have been tampered with. Treat with reduced confidence.
+
+---
+
 ## Changelog
 
 ### [Date] - [Author]: [Summary]

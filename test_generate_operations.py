@@ -6,12 +6,16 @@ Run with: python -m unittest test_generate_operations -v
 """
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from generate_operations import OperationsRenderer, collect_system_info, load_json_info
+from generate_operations import (
+    OperationsRenderer, collect_system_info, load_json_info,
+    gpg_available, gpg_sign_file, gpg_verify_file,
+)
 
 
 class TestOperationsRenderer(unittest.TestCase):
@@ -511,6 +515,118 @@ class TestEmptyData(unittest.TestCase):
         # Should not raise exceptions
         output = renderer.render()
         self.assertIsInstance(output, str)
+
+
+class TestGPGSigning(unittest.TestCase):
+    """Tests for GPG signing and verification functions."""
+
+    @patch("generate_operations.shutil.which", return_value=None)
+    def test_gpg_available_no_gpg(self, mock_which):
+        """Test gpg_available returns False when gpg is not installed."""
+        self.assertFalse(gpg_available())
+
+    @patch("generate_operations.subprocess.run")
+    @patch("generate_operations.shutil.which", return_value="/usr/bin/gpg")
+    def test_gpg_available_no_key(self, mock_which, mock_run):
+        """Test gpg_available returns False when no secret key exists."""
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
+        self.assertFalse(gpg_available())
+
+    @patch("generate_operations.subprocess.run")
+    @patch("generate_operations.shutil.which", return_value="/usr/bin/gpg")
+    def test_gpg_available_with_key(self, mock_which, mock_run):
+        """Test gpg_available returns True when a secret key exists."""
+        mock_run.return_value = MagicMock(
+            stdout="sec   rsa4096/ABCDEF1234567890 2024-01-01 [SC]", returncode=0
+        )
+        self.assertTrue(gpg_available())
+
+    @patch("generate_operations.gpg_available", return_value=False)
+    def test_sign_file_no_gpg(self, mock_avail):
+        """Test gpg_sign_file returns False when gpg is not available."""
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"test content")
+            f.flush()
+            result = gpg_sign_file(f.name, quiet=True)
+            self.assertFalse(result)
+        Path(f.name).unlink()
+
+    @patch("generate_operations.subprocess.run")
+    @patch("generate_operations.gpg_available", return_value=True)
+    def test_sign_file_success(self, mock_avail, mock_run):
+        """Test gpg_sign_file returns True on successful signing."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"test content")
+            f.flush()
+            result = gpg_sign_file(f.name, quiet=True)
+            self.assertTrue(result)
+        Path(f.name).unlink()
+
+    @patch("generate_operations.subprocess.run")
+    @patch("generate_operations.gpg_available", return_value=True)
+    def test_sign_file_failure(self, mock_avail, mock_run):
+        """Test gpg_sign_file returns False on GPG failure."""
+        mock_run.return_value = MagicMock(returncode=2, stderr="gpg: signing failed")
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"test content")
+            f.flush()
+            result = gpg_sign_file(f.name, quiet=True)
+            self.assertFalse(result)
+        Path(f.name).unlink()
+
+    def test_verify_file_unsigned(self):
+        """Test gpg_verify_file returns 2 when no .asc file exists."""
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"test content")
+            f.flush()
+            result = gpg_verify_file(f.name)
+            self.assertEqual(result, 2)
+        Path(f.name).unlink()
+
+    @patch("generate_operations.shutil.which", return_value="/usr/bin/gpg")
+    @patch("generate_operations.subprocess.run")
+    def test_verify_file_valid(self, mock_run, mock_which):
+        """Test gpg_verify_file returns 0 when signature is valid."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="Good signature")
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"test content")
+            f.flush()
+            # Create a fake .asc file
+            asc_path = f.name + ".asc"
+            Path(asc_path).write_text("fake signature")
+            result = gpg_verify_file(f.name)
+            self.assertEqual(result, 0)
+        Path(f.name).unlink()
+        Path(asc_path).unlink()
+
+    @patch("generate_operations.shutil.which", return_value="/usr/bin/gpg")
+    @patch("generate_operations.subprocess.run")
+    def test_verify_file_invalid(self, mock_run, mock_which):
+        """Test gpg_verify_file returns 1 when signature is invalid."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="BAD signature")
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"test content")
+            f.flush()
+            asc_path = f.name + ".asc"
+            Path(asc_path).write_text("fake signature")
+            result = gpg_verify_file(f.name)
+            self.assertEqual(result, 1)
+        Path(f.name).unlink()
+        Path(asc_path).unlink()
+
+    @patch("generate_operations.shutil.which", return_value=None)
+    def test_verify_file_no_gpg_with_asc(self, mock_which):
+        """Test gpg_verify_file returns 1 when gpg missing but .asc exists."""
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+            f.write(b"test content")
+            f.flush()
+            asc_path = f.name + ".asc"
+            Path(asc_path).write_text("fake signature")
+            result = gpg_verify_file(f.name)
+            self.assertEqual(result, 1)
+        Path(f.name).unlink()
+        Path(asc_path).unlink()
 
 
 if __name__ == "__main__":

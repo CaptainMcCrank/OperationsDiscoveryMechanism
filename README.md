@@ -75,11 +75,18 @@ That's it. No pip install, no virtual environments, no dependency hell.
 # Collect system data
 python3 mac_system_info.py -o system_info.json
 
-# Generate Operations.md
+# Generate Operations.md (signed with GPG by default)
 python3 generate_operations.py
+# Produces: Operations.md + Operations.md.asc
 
 # Or do both with one command
 python3 generate_operations.py -o Operations.md
+
+# Skip signing (CI/testing without GPG)
+python3 generate_operations.py -o Operations.md --no-sign
+
+# Verify an existing document
+python3 generate_operations.py --verify Operations.md
 ```
 
 ### Linux
@@ -260,6 +267,45 @@ In VS Code or any editor with outline view, you can see all `##` headings at a g
 | Log locations | `log` or `logs` |
 | Disk space | `df -h` or `Disk` |
 | Network config | `192.` or `Network` |
+
+## Document Signing
+
+Operations.md files are GPG-signed to protect against tampering. After generation, a detached signature (`Operations.md.asc`) is created alongside the document.
+
+### How It Works
+
+Signing is **on by default** when generating via the Python script:
+
+```bash
+# Generate and sign (default)
+python3 generate_operations.py -o Operations.md
+
+# Skip signing (CI/testing without GPG)
+python3 generate_operations.py -o Operations.md --no-sign
+```
+
+### Verifying a Document
+
+```bash
+# Verify using the script
+python3 generate_operations.py --verify Operations.md
+
+# Or verify directly with gpg
+gpg --verify Operations.md.asc Operations.md
+```
+
+Three outcomes:
+- **VALID** — Signature matches. Proceed normally.
+- **UNSIGNED** — No `.asc` file found. The document may pre-date signing or may have been tampered with. Treat with reduced confidence.
+- **INVALID** — Signature exists but verification failed. The document may have been modified after signing. Do not trust.
+
+### Graceful Degradation
+
+If `gpg` is not installed or no secret key is available, the script warns but does not fail. Signing is best-effort — the document is always written regardless.
+
+### For AI Agents
+
+When an agent (Claude Code or similar) reads an Operations.md, it should check for a `.asc` file and verify the signature before trusting the contents. This prevents agents from acting on tampered or forged documents. See the verification flow in `operations-template.md`.
 
 ## Project Structure
 
