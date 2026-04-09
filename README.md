@@ -30,7 +30,7 @@ The documentation is generated from actual system data, not memory. It uses plat
 | Platform | Collector Script | Tests |
 |----------|-----------------|-------|
 | macOS | `mac_system_info.py` | 25 |
-| Linux (Debian/Ubuntu/Pop!_OS) | `linux_system_info.py` | 22 |
+| Linux (Debian/Ubuntu/Pop!_OS) | `linux_system_info.py` | 22+ |
 
 ## What You Get
 
@@ -92,17 +92,15 @@ python3 generate_operations.py --verify Operations.md
 ### Linux
 
 ```bash
-# Collect system data
+# Collect system data and generate Operations.md (one step)
+python3 generate_operations.py -o Operations.md --no-sign
+
+# Or collect and generate separately
 python3 linux_system_info.py -o system_info.json
-
-# Preview the collected data
-python3 linux_system_info.py | less
-
-# Save to a specific location
-python3 linux_system_info.py -o ~/ops/$(hostname)-info.json
+python3 generate_operations.py --json system_info.json -o Operations.md --no-sign
 ```
 
-> **Note:** The `generate_operations.py` renderer currently uses macOS command conventions. For Linux systems, collect data with `linux_system_info.py` and use Claude to render platform-appropriate documentation (see AI-Assisted section below).
+> **Note:** The `linux_system_info.py` collector tries `sudo -n ss -tlnp` first to get full process visibility for all listening ports. Without sudo, ports owned by other users (e.g., nginx running as root) will show up but without process names. To enable this, ensure the collecting user has passwordless sudo for `ss`, or run the collector as root.
 
 ## Platform-Specific Commands
 
@@ -125,12 +123,16 @@ python3 linux_system_info.py -o ~/ops/$(hostname)-info.json
 | Disk | `lsblk`, `df -h` |
 | Network | `ip addr`, `ip route`, `/etc/resolv.conf` |
 | Services | `systemctl list-units` |
-| Ports | `ss -tlnp` |
+| Ports | `sudo -n ss -tlnp` (falls back to `ss -tlnp`) |
 | Logs | `journalctl` |
+
+> **Port detection note:** Without sudo, `ss -tlnp` only shows process names for ports owned by the current user. Services like nginx (root/www-data) or sshd (root) will appear as listening ports but without process identification. The collector tries non-interactive `sudo -n` first for full visibility, falling back gracefully if unavailable.
 
 ## AI-Assisted Documentation (Claude Code)
 
-For richer documentation with context-aware descriptions, use Claude Code with the collected JSON. This approach lets you add explanations, document service purposes, and capture institutional knowledge that scripts can't infer.
+The renderer (`generate_operations.py`) now handles both macOS and Linux natively, auto-detecting the platform from the collected JSON. For most use cases, the script is all you need.
+
+However, for richer documentation with context-aware descriptions, you can also use Claude Code with the collected JSON. This approach lets you add explanations, document service purposes, and capture institutional knowledge that scripts can't infer.
 
 **Important:** Always collect data with the script first, then give Claude the structured output. This ensures:
 - **Consistency**: The tested, idempotent script gathers data the same way every time
@@ -139,33 +141,30 @@ For richer documentation with context-aware descriptions, use Claude Code with t
 
 ### The Prompt
 
-**Step 1: Collect data (run this first)**
+**Step 1: Collect and generate (run this first)**
 
 ```bash
-# macOS
-python3 mac_system_info.py -o system_info.json
+# One-step: collect data and generate Operations.md
+python3 generate_operations.py -o Operations.md --no-sign
 
-# Linux
-python3 linux_system_info.py -o system_info.json
+# Or two-step: collect separately, then render
+python3 mac_system_info.py -o system_info.json   # macOS
+python3 linux_system_info.py -o system_info.json  # Linux
+python3 generate_operations.py --json system_info.json -o Operations.md --no-sign
 ```
 
-**Step 2: Use this prompt in Claude Code**
+**Step 2 (optional): Use Claude Code to enrich the documentation**
 
 ```
-Read the system information from system_info.json and the template structure from operations-template.md.
+Read system_info.json and the generated Operations.md.
 
-Generate an Operations.md file that:
-1. Populates every section with the real data from system_info.json
-2. Uses platform-appropriate commands:
-   - macOS: brew services, launchctl, lsof, diskutil, log show, caffeinate
-   - Linux: systemctl, journalctl, ss, lsblk, ip
-3. Adds contextual descriptions where you can infer purpose (e.g., "nginx on port 80 - web server")
-4. Flags potential issues in the Known Issues section (high disk usage, etc.)
-5. Includes copy-paste ready commands for every operational task
+Enhance the document by:
+1. Adding contextual descriptions for each service (e.g., "nginx reverse-proxies to the Flask app on :5000")
+2. Documenting relationships between services
+3. Adding environment-specific troubleshooting steps
+4. Flagging any security or operational concerns you notice
 
-If a section has no applicable data (e.g., no Docker containers), keep the section header with a note that it's not currently in use.
-
-Write the completed Operations.md to the current directory.
+Keep all existing data and commands intact — only add context.
 ```
 
 ---
@@ -195,17 +194,16 @@ Update Operations.md with this additional context:
 | First-time deep documentation with explanations | Script + Claude |
 | Troubleshooting using collected data | Script + Claude |
 
-**Why use Claude at all if the script collects data?**
+**Why use Claude at all if the script generates docs automatically?**
 
-The collector produces accurate, structured JSON. Claude adds value when you need:
+The renderer produces accurate, platform-appropriate Operations.md. Claude adds value when you need:
 
 - **Institutional knowledge**: "This Redis instance caches session data for the web app"
 - **Inferred relationships**: "Port 3000 (Node) talks to port 5432 (Postgres)"
 - **Custom troubleshooting**: Problems specific to your setup
 - **Interactive exploration**: "What's using the most disk space and can I delete it?"
-- **Platform-appropriate rendering**: Convert JSON to markdown with the right commands
 
-For pure data collection, the Python script is faster and deterministic. Use Claude when you need interpretation, not just transcription.
+For pure data collection and rendering, the Python scripts are faster and deterministic. Use Claude when you need interpretation, not just transcription.
 
 ## Reading Operations.md Effectively
 
@@ -315,10 +313,10 @@ OperationsDiscoveryMechanism/
 ├── operations-template.md       # Template structure (for reference)
 ├── mac_system_info.py          # macOS data collector
 ├── linux_system_info.py        # Linux data collector
-├── generate_operations.py       # Markdown renderer (macOS-focused)
+├── generate_operations.py       # Markdown renderer (auto-detects platform)
 ├── test_mac_system_info.py     # macOS collector tests (25 tests)
 ├── test_linux_system_info.py   # Linux collector tests (22 tests)
-├── test_generate_operations.py # Renderer tests (26 tests)
+├── test_generate_operations.py # Renderer tests (56 tests, macOS + Linux)
 ├── todo.txt                    # Project roadmap
 └── Operations.md               # Generated output (gitignored)
 ```
@@ -401,6 +399,101 @@ python3 mac_system_info.py -o ../machines/$(hostname -s)/system_info.json
 # On Linux
 python3 linux_system_info.py -o ../machines/$(hostname -s)/system_info.json
 ```
+
+## Cross-Host Workflow (Collect Remotely, Render Locally)
+
+Not every target system needs Python installed, or you may prefer to manage all documentation from a single workstation. The two-stage architecture (collect → render) supports this naturally because:
+
+1. **Collection** only needs the platform-specific collector script and Python 3.9+
+2. **Rendering** only needs the JSON output — it auto-detects the platform from the data
+
+### Step 1: Deploy the collector to the target
+
+Copy only the collector script the target needs. No other files are required:
+
+```bash
+# For a Linux target
+scp linux_system_info.py user@target-host:~/
+
+# For a macOS target
+scp mac_system_info.py user@target-host:~/
+```
+
+### Step 2: Collect data on the target
+
+```bash
+# SSH in and run the collector
+ssh user@target-host "python3 ~/linux_system_info.py -o ~/system_info.json"
+```
+
+For full port visibility on Linux, the collecting user should have passwordless sudo for `ss`. Add this to `/etc/sudoers.d/operations-discovery` on the target:
+
+```
+username ALL=(ALL) NOPASSWD: /usr/bin/ss
+```
+
+### Step 3: Pull the JSON back to your workstation
+
+```bash
+scp user@target-host:~/system_info.json ./machines/target-host/system_info.json
+```
+
+### Step 4: Render locally
+
+The renderer auto-detects the platform from the JSON data (via the `platform` field or by inspecting which service keys are present):
+
+```bash
+python3 generate_operations.py --json ./machines/target-host/system_info.json \
+    -o ./machines/target-host/Operations.md --no-sign
+```
+
+### One-liner for remote collection
+
+Combine steps 2–4 into a single command:
+
+```bash
+# Collect on remote host and render locally
+ssh user@target-host "python3 ~/linux_system_info.py" > machines/target-host/system_info.json \
+    && python3 generate_operations.py --json machines/target-host/system_info.json \
+       -o machines/target-host/Operations.md --no-sign
+```
+
+### Script to refresh all machines
+
+```bash
+#!/bin/bash
+# refresh-all-docs.sh — Collect from all targets, render locally
+
+declare -A HOSTS=(
+    ["web-server"]="pi@webserver.local"
+    ["dev-laptop"]="user@dev.local"
+    # Add more hosts here
+)
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+for name in "${!HOSTS[@]}"; do
+    host="${HOSTS[$name]}"
+    dir="machines/$name"
+    mkdir -p "$dir"
+    echo "Collecting from $name ($host)..."
+    ssh "$host" "python3 ~/linux_system_info.py" > "$dir/system_info.json" 2>/dev/null \
+        || ssh "$host" "python3 ~/mac_system_info.py" > "$dir/system_info.json" 2>/dev/null
+    python3 "$SCRIPT_DIR/generate_operations.py" --json "$dir/system_info.json" \
+        -o "$dir/Operations.md" --no-sign --quiet
+    echo "  → $dir/Operations.md"
+done
+```
+
+### When to use cross-host vs. local
+
+| Scenario | Approach |
+|----------|----------|
+| Target has Python 3.9+ and you can SSH in | Run everything on the target |
+| Target is minimal (no Python, embedded, IoT) | Copy collector, collect, pull JSON, render locally |
+| You want centralized documentation management | Cross-host: collect everywhere, render on your workstation |
+| CI/CD automated doc generation | Local on each host, commit to a shared repo |
+| Target is air-gapped or access-restricted | Copy collector via USB, run, copy JSON out, render elsewhere |
 
 ## Philosophy
 

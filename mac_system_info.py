@@ -130,6 +130,7 @@ class SystemInfo:
     listening_ports: list = field(default_factory=list)
     cron_jobs: list = field(default_factory=list)
     config_files: list = field(default_factory=list)
+    platform: str = "darwin"
     collection_timestamp: str = ""
     errors: list = field(default_factory=list)
 

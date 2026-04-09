@@ -528,7 +528,8 @@ class TestIdempotency(unittest.TestCase):
 
         readonly_commands = {
             "hostnamectl", "lscpu", "free", "cat", "lsblk", "df",
-            "hostname", "ip", "systemctl", "docker", "ss", "crontab"
+            "hostname", "ip", "systemctl", "docker", "ss", "crontab",
+            "sudo",  # sudo -n ss -tlnp: non-interactive sudo for read-only ss
         }
 
         for call in runner.calls:

@@ -3,7 +3,7 @@
 generate_operations.py - Generate Operations.md from system information
 
 This script:
-1. Collects system information using mac_system_info.py
+1. Collects system information using platform-appropriate collector
 2. Renders the data into a Markdown operations document
 3. Writes the output to Operations.md
 4. Optionally signs the output with GPG (detached signature)
@@ -19,14 +19,13 @@ Usage:
 
 import argparse
 import json
+import platform
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
-from mac_system_info import MacSystemInfoCollector, SystemInfo
 
 
 class OperationsRenderer:
@@ -37,10 +36,28 @@ class OperationsRenderer:
         Initialize renderer with system info dictionary.
 
         Args:
-            info: Dictionary from MacSystemInfoCollector.to_dict()
+            info: Dictionary from collector's to_dict()
         """
         self.info = info
         self.lines: list[str] = []
+        self.is_linux = self._detect_linux()
+
+    def _detect_linux(self) -> bool:
+        """Detect if the system info is from a Linux system."""
+        # Explicit platform field (preferred)
+        plat = self.info.get("platform", "")
+        if plat:
+            return plat == "linux"
+        # Heuristic: Linux collector produces systemd_services, macOS produces homebrew_services
+        if self.info.get("systemd_services"):
+            return True
+        if self.info.get("homebrew_services") or self.info.get("launchd_services"):
+            return False
+        # Check hardware fields
+        hw = self.info.get("hardware", {})
+        if hw.get("kernel", "").startswith("Linux"):
+            return True
+        return False
 
     def render(self) -> str:
         """Render the full Operations.md document."""
@@ -69,22 +86,40 @@ class OperationsRenderer:
         """Add a line to the output."""
         self.lines.append(text)
 
+    def _get_port_address(self, port: dict) -> str:
+        """Get the address string from a port entry, handling both platforms."""
+        return port.get("address", "") or port.get("local_address", "")
+
     def _render_header(self):
         """Render document header."""
         hw = self.info.get("hardware", {})
-        model = hw.get("model_name", "Mac")
-        chip = hw.get("chip", "")
-        memory = hw.get("memory", "")
 
-        system_desc = f"{model}"
-        if chip:
-            system_desc += f" ({chip})"
+        if self.is_linux:
+            hostname = hw.get("hostname", "Linux")
+            os_name = hw.get("os_name", "Linux")
+            cpu = hw.get("cpu_model", "")
+            memory = hw.get("memory_total", "")
+            system_desc = hostname
+            if cpu:
+                system_desc += f" ({cpu})"
+            self._add(f"# Operations Guide - {hostname}")
+            self._add()
+            self._add(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d')}")
+            self._add("**Updated By:** generate_operations.py")
+            self._add(f"**System:** {system_desc}, {memory} RAM, {os_name}")
+        else:
+            model = hw.get("model_name", "Mac")
+            chip = hw.get("chip", "")
+            memory = hw.get("memory", "")
+            system_desc = f"{model}"
+            if chip:
+                system_desc += f" ({chip})"
+            self._add(f"# Operations Guide - {model}")
+            self._add()
+            self._add(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d')}")
+            self._add("**Updated By:** generate_operations.py")
+            self._add(f"**System:** {system_desc}, {memory} RAM, macOS")
 
-        self._add(f"# Operations Guide - {model}")
-        self._add()
-        self._add(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d')}")
-        self._add("**Updated By:** generate_operations.py")
-        self._add(f"**System:** {system_desc}, {memory} RAM, macOS")
         self._add()
         self._add("---")
         self._add()
@@ -96,31 +131,54 @@ class OperationsRenderer:
         self._add("### System Status Check")
         self._add("```bash")
         self._add("# One-liner to check critical services")
-        self._add('brew services list && launchctl list | grep -v com.apple | head -10')
+        if self.is_linux:
+            self._add('systemctl list-units --type=service --state=running --no-pager | head -20')
+        else:
+            self._add('brew services list && launchctl list | grep -v com.apple | head -10')
         self._add("```")
         self._add()
         self._add("### View Logs")
         self._add("```bash")
-        self._add("# System logs (last hour, errors only)")
-        self._add("log show --predicate 'eventType == logEvent' --style compact --last 1h | grep -i error")
-        self._add()
-        self._add("# Specific process logs")
-        self._add('log show --predicate \'process == "ProcessName"\' --last 1h')
-        self._add()
-        self._add("# Real-time system log")
-        self._add("log stream --predicate 'eventType == logEvent' --style compact")
-        self._add()
-        self._add("# Crash logs")
-        self._add("ls -lt ~/Library/Logs/DiagnosticReports/ | head -10")
+        if self.is_linux:
+            self._add("# System logs (last hour, errors only)")
+            self._add("journalctl --since '1 hour ago' -p err --no-pager")
+            self._add()
+            self._add("# Specific service logs")
+            self._add("journalctl -u <service_name> --since '1 hour ago' --no-pager")
+            self._add()
+            self._add("# Real-time system log")
+            self._add("journalctl -f")
+            self._add()
+            self._add("# Kernel messages")
+            self._add("dmesg --time-format reltime | tail -30")
+        else:
+            self._add("# System logs (last hour, errors only)")
+            self._add("log show --predicate 'eventType == logEvent' --style compact --last 1h | grep -i error")
+            self._add()
+            self._add("# Specific process logs")
+            self._add('log show --predicate \'process == "ProcessName"\' --last 1h')
+            self._add()
+            self._add("# Real-time system log")
+            self._add("log stream --predicate 'eventType == logEvent' --style compact")
+            self._add()
+            self._add("# Crash logs")
+            self._add("ls -lt ~/Library/Logs/DiagnosticReports/ | head -10")
         self._add("```")
         self._add()
         self._add("### Restart Services")
         self._add("```bash")
-        self._add("# Homebrew service")
-        self._add("brew services restart <service_name>")
-        self._add()
-        self._add("# Application restart")
-        self._add('killall "App Name" && open -a "App Name"')
+        if self.is_linux:
+            self._add("# Systemd service")
+            self._add("sudo systemctl restart <service_name>")
+            self._add()
+            self._add("# Check service status")
+            self._add("systemctl status <service_name>")
+        else:
+            self._add("# Homebrew service")
+            self._add("brew services restart <service_name>")
+            self._add()
+            self._add("# Application restart")
+            self._add('killall "App Name" && open -a "App Name"')
         self._add("```")
         self._add()
         self._add("---")
@@ -145,10 +203,14 @@ class OperationsRenderer:
         ports = self.info.get("listening_ports", [])
         services_by_process = {}
         for port in ports:
-            proc = port.get("process", "unknown")
+            proc = port.get("process", "") or "unknown"
             if proc not in services_by_process:
                 services_by_process[proc] = []
-            services_by_process[proc].append(port.get("address", ""))
+            services_by_process[proc].append(self._get_port_address(port))
+
+        # On Linux, also incorporate systemd service names for ports without process info
+        if self.is_linux:
+            services_by_process = self._enrich_from_systemd(services_by_process)
 
         self._add("```")
         self._add("                        +------------------------+")
@@ -160,12 +222,12 @@ class OperationsRenderer:
         self._add(f"|                    {primary_ip:<40}        |")
         self._add("|                                                                     |")
 
-        # Show top services
-        top_services = list(services_by_process.items())[:4]
+        # Show top services (skip empty/unknown process names)
+        named_services = {k: v for k, v in services_by_process.items() if k and k != "unknown"}
+        top_services = list(named_services.items())[:4]
         if top_services:
             service_line = "|   "
             for proc, addrs in top_services:
-                port_str = addrs[0] if addrs else ""
                 service_line += f"+{proc[:12]:<12}+  "
             self._add(service_line.ljust(70) + "|")
 
@@ -179,16 +241,73 @@ class OperationsRenderer:
         self._add("| Component | Port | Purpose | Type |")
         self._add("|-----------|------|---------|------|")
 
+        seen_ports = set()
         for port in ports[:10]:  # Limit to first 10
-            process = port.get("process", "unknown")
-            address = port.get("address", "")
+            process = port.get("process", "") or "unknown"
+            address = self._get_port_address(port)
             port_num = address.split(":")[-1] if ":" in address else address
+            if port_num in seen_ports:
+                continue
+            seen_ports.add(port_num)
             purpose = self._infer_purpose(process)
-            self._add(f"| {process} | {port_num} | {purpose} | native |")
+            svc_type = "native"
+            self._add(f"| {process} | {port_num} | {purpose} | {svc_type} |")
 
         self._add()
         self._add("---")
         self._add()
+
+    def _enrich_from_systemd(self, services_by_process: dict) -> dict:
+        """Use systemd service data to fill in process names for unknown ports."""
+        systemd = self.info.get("systemd_services", [])
+        # Build a mapping of well-known service units to process names
+        unit_to_process = {}
+        for svc in systemd:
+            unit = svc.get("unit", "")
+            desc = svc.get("description", "").lower()
+            if "nginx" in unit or "nginx" in desc:
+                unit_to_process["nginx"] = desc
+            elif "apache" in unit or "httpd" in unit:
+                unit_to_process["apache"] = desc
+            elif "ssh" in unit:
+                unit_to_process["sshd"] = desc
+            elif "flask" in desc or "gunicorn" in desc or "uvicorn" in desc:
+                # Extract a meaningful name from the unit
+                name = unit.replace(".service", "")
+                unit_to_process[name] = desc
+
+        # If we have unknown ports, try to assign names from systemd
+        unknown_addrs = services_by_process.pop("unknown", [])
+        if unknown_addrs and not services_by_process.pop("", []):
+            pass  # already removed empty key
+        else:
+            unknown_addrs += services_by_process.pop("", [])
+
+        if unknown_addrs:
+            for addr in unknown_addrs:
+                port_num = addr.split(":")[-1] if ":" in addr else addr
+                matched = False
+                # Try to match by well-known port
+                if port_num == "80" or port_num == "443":
+                    for proc_name in ["nginx", "apache"]:
+                        if proc_name in unit_to_process:
+                            if proc_name not in services_by_process:
+                                services_by_process[proc_name] = []
+                            services_by_process[proc_name].append(addr)
+                            matched = True
+                            break
+                elif port_num == "22":
+                    if "sshd" not in services_by_process:
+                        services_by_process["sshd"] = []
+                    services_by_process["sshd"].append(addr)
+                    matched = True
+
+                if not matched:
+                    if "unknown" not in services_by_process:
+                        services_by_process["unknown"] = []
+                    services_by_process["unknown"].append(addr)
+
+        return services_by_process
 
     def _infer_purpose(self, process: str) -> str:
         """Infer service purpose from process name."""
@@ -205,7 +324,14 @@ class OperationsRenderer:
             "redis": "Redis cache",
             "nginx": "Web server",
             "httpd": "Apache web server",
+            "apache": "Apache web server",
+            "lighttpd": "Lighttpd web server",
+            "caddy": "Caddy web server",
+            "sshd": "SSH server",
             "Code": "VS Code dev server",
+            "gunicorn": "Python WSGI server",
+            "uvicorn": "Python ASGI server",
+            "flask": "Flask application",
         }
         for key, value in purposes.items():
             if key.lower() in process.lower():
@@ -214,6 +340,86 @@ class OperationsRenderer:
 
     def _render_services(self):
         """Render services sections."""
+        if self.is_linux:
+            self._render_services_linux()
+        else:
+            self._render_services_macos()
+
+        # Docker containers (shared)
+        docker = self.info.get("docker_containers", [])
+        self._add("## Docker")
+        self._add()
+        if docker:
+            self._add("| Container | Status | Ports |")
+            self._add("|-----------|--------|-------|")
+            for container in docker:
+                self._add(f"| {container.get('name', '')} | {container.get('status', '')} | {container.get('ports', '')} |")
+            self._add()
+            self._add("### Quick Commands")
+            self._add()
+            self._add("```bash")
+            self._add("docker ps                    # List running containers")
+            self._add("docker logs -f <container>   # Follow container logs")
+            self._add("docker restart <container>   # Restart container")
+            self._add("docker stats                 # Resource usage")
+            self._add("```")
+        else:
+            self._add("**Status:** Not currently running or installed")
+            self._add()
+            self._add("```bash")
+            if self.is_linux:
+                self._add("# Install Docker")
+                self._add("curl -fsSL https://get.docker.com | sh")
+                self._add()
+            else:
+                self._add("# Start Docker Desktop")
+                self._add("open -a Docker")
+                self._add()
+            self._add("# Verify Docker is running")
+            self._add("docker info")
+            self._add("```")
+        self._add()
+        self._add("---")
+        self._add()
+
+    def _render_services_linux(self):
+        """Render systemd services section for Linux."""
+        systemd_services = self.info.get("systemd_services", [])
+        if systemd_services:
+            self._add("## Systemd Services")
+            self._add()
+            self._add("| Unit | Status | Description |")
+            self._add("|------|--------|-------------|")
+            for svc in systemd_services:
+                unit = svc.get("unit", "")
+                status = f"{svc.get('active', '')}/{svc.get('sub', '')}"
+                desc = svc.get("description", "")
+                self._add(f"| {unit} | {status} | {desc} |")
+            self._add()
+            self._add("### Quick Commands")
+            self._add()
+            self._add("```bash")
+            self._add("# List all running services")
+            self._add("systemctl list-units --type=service --state=running")
+            self._add()
+            self._add("# Start/stop/restart a service")
+            self._add("sudo systemctl start <service>")
+            self._add("sudo systemctl stop <service>")
+            self._add("sudo systemctl restart <service>")
+            self._add()
+            self._add("# Enable/disable service at boot")
+            self._add("sudo systemctl enable <service>")
+            self._add("sudo systemctl disable <service>")
+            self._add()
+            self._add("# View service logs")
+            self._add("journalctl -u <service> -f")
+            self._add("```")
+            self._add()
+            self._add("---")
+            self._add()
+
+    def _render_services_macos(self):
+        """Render Homebrew and launchd services for macOS."""
         # Homebrew services
         brew_services = self.info.get("homebrew_services", [])
         if brew_services:
@@ -257,38 +463,6 @@ class OperationsRenderer:
             self._add("---")
             self._add()
 
-        # Docker containers
-        docker = self.info.get("docker_containers", [])
-        self._add("## Docker")
-        self._add()
-        if docker:
-            self._add("| Container | Status | Ports |")
-            self._add("|-----------|--------|-------|")
-            for container in docker:
-                self._add(f"| {container.get('name', '')} | {container.get('status', '')} | {container.get('ports', '')} |")
-            self._add()
-            self._add("### Quick Commands")
-            self._add()
-            self._add("```bash")
-            self._add("docker ps                    # List running containers")
-            self._add("docker logs -f <container>   # Follow container logs")
-            self._add("docker restart <container>   # Restart container")
-            self._add("docker stats                 # Resource usage")
-            self._add("```")
-        else:
-            self._add("**Status:** Not currently running or installed")
-            self._add()
-            self._add("```bash")
-            self._add("# Start Docker Desktop")
-            self._add("open -a Docker")
-            self._add()
-            self._add("# Verify Docker is running")
-            self._add("docker info")
-            self._add("```")
-        self._add()
-        self._add("---")
-        self._add()
-
     def _render_hardware(self):
         """Render hardware specifications."""
         hw = self.info.get("hardware", {})
@@ -297,13 +471,31 @@ class OperationsRenderer:
         self._add()
         self._add("| Component | Specification |")
         self._add("|-----------|---------------|")
-        self._add(f"| **Model** | {hw.get('model_name', 'Unknown')} ({hw.get('model_identifier', '')}) |")
-        self._add(f"| **Model Number** | {hw.get('model_number', '')} |")
-        self._add(f"| **Chip** | {hw.get('chip', 'Unknown')} |")
-        self._add(f"| **Cores** | {hw.get('total_cores', 'Unknown')} |")
-        self._add(f"| **RAM** | {hw.get('memory', 'Unknown')} |")
-        self._add(f"| **Firmware** | {hw.get('firmware_version', '')} |")
-        self._add(f"| **Serial** | {hw.get('serial_number', '')} |")
+
+        if self.is_linux:
+            self._add(f"| **Hostname** | {hw.get('hostname', 'Unknown')} |")
+            self._add(f"| **OS** | {hw.get('os_name', 'Unknown')} {hw.get('os_version', '')} |")
+            self._add(f"| **Kernel** | {hw.get('kernel', 'Unknown')} |")
+            self._add(f"| **Architecture** | {hw.get('architecture', 'Unknown')} |")
+            self._add(f"| **CPU** | {hw.get('cpu_model', 'Unknown')} |")
+            cores = hw.get('cpu_cores', '')
+            threads = hw.get('cpu_threads', '')
+            if cores and threads:
+                self._add(f"| **CPU Cores/Threads** | {cores} cores / {threads} threads |")
+            elif threads:
+                self._add(f"| **CPU Threads** | {threads} |")
+            self._add(f"| **RAM** | {hw.get('memory_total', 'Unknown')} (available: {hw.get('memory_available', 'N/A')}) |")
+            if hw.get('virtualization'):
+                self._add(f"| **Virtualization** | {hw.get('virtualization')} |")
+        else:
+            self._add(f"| **Model** | {hw.get('model_name', 'Unknown')} ({hw.get('model_identifier', '')}) |")
+            self._add(f"| **Model Number** | {hw.get('model_number', '')} |")
+            self._add(f"| **Chip** | {hw.get('chip', 'Unknown')} |")
+            self._add(f"| **Cores** | {hw.get('total_cores', 'Unknown')} |")
+            self._add(f"| **RAM** | {hw.get('memory', 'Unknown')} |")
+            self._add(f"| **Firmware** | {hw.get('firmware_version', '')} |")
+            self._add(f"| **Serial** | {hw.get('serial_number', '')} |")
+
         self._add()
         self._add("---")
         self._add()
@@ -320,10 +512,16 @@ class OperationsRenderer:
         if partitions:
             self._add("### Partitions")
             self._add()
-            self._add("| Device | Name | Size | Type | Identifier |")
-            self._add("|--------|------|------|------|------------|")
-            for part in partitions:
-                self._add(f"| {part.get('device', '')} | {part.get('name', '')} | {part.get('size', '')} | {part.get('type', '')} | {part.get('identifier', '')} |")
+            if self.is_linux:
+                self._add("| Device | Size | Type | Mount Point | Filesystem |")
+                self._add("|--------|------|------|-------------|------------|")
+                for part in partitions:
+                    self._add(f"| {part.get('name', '')} | {part.get('size', '')} | {part.get('type', '')} | {part.get('mountpoint', '')} | {part.get('fstype', '')} |")
+            else:
+                self._add("| Device | Name | Size | Type | Identifier |")
+                self._add("|--------|------|------|------|------------|")
+                for part in partitions:
+                    self._add(f"| {part.get('device', '')} | {part.get('name', '')} | {part.get('size', '')} | {part.get('type', '')} | {part.get('identifier', '')} |")
             self._add()
 
         if usage:
@@ -336,7 +534,8 @@ class OperationsRenderer:
                 # Truncate long mount points
                 if len(mount) > 30:
                     mount = "..." + mount[-27:]
-                self._add(f"| {mount} | {u.get('size', '')} | {u.get('used', '')} | {u.get('available', '')} | {u.get('capacity', '')} |")
+                cap = u.get("capacity", "") or u.get("use_percent", "")
+                self._add(f"| {mount} | {u.get('size', '')} | {u.get('used', '')} | {u.get('available', '')} | {cap} |")
             self._add()
 
         self._add("### Storage Guidelines")
@@ -352,11 +551,18 @@ class OperationsRenderer:
         self._add("# Find large files")
         self._add("find ~ -type f -size +500M 2>/dev/null | head -20")
         self._add()
-        self._add("# Interactive disk usage analyzer")
-        self._add("# brew install ncdu && ncdu /")
-        self._add()
-        self._add("# APFS container info")
-        self._add("diskutil apfs list")
+        if self.is_linux:
+            self._add("# Interactive disk usage analyzer")
+            self._add("# sudo apt install ncdu && ncdu /")
+            self._add()
+            self._add("# Block device info")
+            self._add("lsblk -f")
+        else:
+            self._add("# Interactive disk usage analyzer")
+            self._add("# brew install ncdu && ncdu /")
+            self._add()
+            self._add("# APFS container info")
+            self._add("diskutil apfs list")
         self._add("```")
         self._add()
         self._add("---")
@@ -370,32 +576,46 @@ class OperationsRenderer:
         self._add()
         self._add("**Automated Health Check:**")
         self._add("```bash")
-        self._add('echo "=== Homebrew Services ===" && brew services list')
-        self._add('echo "=== Listening Ports ===" && lsof -iTCP -sTCP:LISTEN -P -n | awk \'{print $1, $9}\' | sort -u')
-        self._add('echo "=== Disk Space ===" && df -h / 2>/dev/null')
-        self._add('echo "=== Memory Pressure ===" && memory_pressure | head -5')
-        self._add('echo "=== CPU Load ===" && sysctl -n vm.loadavg')
+        if self.is_linux:
+            self._add('echo "=== Systemd Services ===" && systemctl list-units --type=service --state=running --no-pager | head -20')
+            self._add('echo "=== Listening Ports ===" && sudo ss -tlnp | column -t')
+            self._add('echo "=== Disk Space ===" && df -h / 2>/dev/null')
+            self._add('echo "=== Memory ===" && free -h')
+            self._add('echo "=== CPU Load ===" && uptime')
+        else:
+            self._add('echo "=== Homebrew Services ===" && brew services list')
+            self._add('echo "=== Listening Ports ===" && lsof -iTCP -sTCP:LISTEN -P -n | awk \'{print $1, $9}\' | sort -u')
+            self._add('echo "=== Disk Space ===" && df -h / 2>/dev/null')
+            self._add('echo "=== Memory Pressure ===" && memory_pressure | head -5')
+            self._add('echo "=== CPU Load ===" && sysctl -n vm.loadavg')
         self._add("```")
         self._add()
         self._add("**Manual Verification Checklist:**")
         self._add("- [ ] Disk space available: `df -h`")
-        self._add("- [ ] Memory not exhausted: `memory_pressure`")
-        self._add("- [ ] No zombie processes: `ps aux | grep Z`")
-        self._add("- [ ] Key services running: `brew services list`")
+        if self.is_linux:
+            self._add("- [ ] Memory not exhausted: `free -h`")
+            self._add("- [ ] No zombie processes: `ps aux | grep Z`")
+            self._add("- [ ] Key services running: `systemctl list-units --type=service --state=running`")
+            self._add("- [ ] No failed services: `systemctl --failed`")
+        else:
+            self._add("- [ ] Memory not exhausted: `memory_pressure`")
+            self._add("- [ ] No zombie processes: `ps aux | grep Z`")
+            self._add("- [ ] Key services running: `brew services list`")
         self._add()
-        self._add("### Prevent Sleep During Long Operations")
-        self._add()
-        self._add("```bash")
-        self._add("# Prevent sleep indefinitely (Ctrl+C to cancel)")
-        self._add("caffeinate")
-        self._add()
-        self._add("# Prevent sleep for 2 hours")
-        self._add("caffeinate -t 7200")
-        self._add()
-        self._add("# Prevent sleep while a command runs")
-        self._add("caffeinate -s long-running-command")
-        self._add("```")
-        self._add()
+        if not self.is_linux:
+            self._add("### Prevent Sleep During Long Operations")
+            self._add()
+            self._add("```bash")
+            self._add("# Prevent sleep indefinitely (Ctrl+C to cancel)")
+            self._add("caffeinate")
+            self._add()
+            self._add("# Prevent sleep for 2 hours")
+            self._add("caffeinate -t 7200")
+            self._add()
+            self._add("# Prevent sleep while a command runs")
+            self._add("caffeinate -s long-running-command")
+            self._add("```")
+            self._add()
         self._add("---")
         self._add()
 
@@ -429,9 +649,13 @@ class OperationsRenderer:
         self._add("# Edit crontab")
         self._add("crontab -e")
         self._add()
-        self._add("# View launchd scheduled tasks")
-        self._add("ls ~/Library/LaunchAgents/")
-        self._add("ls /Library/LaunchAgents/")
+        if self.is_linux:
+            self._add("# View systemd timers")
+            self._add("systemctl list-timers --all --no-pager")
+        else:
+            self._add("# View launchd scheduled tasks")
+            self._add("ls ~/Library/LaunchAgents/")
+            self._add("ls /Library/LaunchAgents/")
         self._add("```")
         self._add()
         self._add("---")
@@ -444,50 +668,77 @@ class OperationsRenderer:
         self._add("### Overview")
         self._add()
 
-        # Check for NoMachine
-        launchd = self.info.get("launchd_services", [])
-        has_nomachine = any("nomachine" in s.get("label", "").lower() for s in launchd)
-
-        # Check for ARD
         ports = self.info.get("listening_ports", [])
-        has_ard = any("ARD" in p.get("process", "") for p in ports)
-
         access_methods = []
-        if has_nomachine:
-            access_methods.append("NoMachine (NX protocol)")
-        if has_ard:
-            access_methods.append("Apple Remote Desktop / Screen Sharing")
-        access_methods.append("SSH (if enabled)")
 
-        self._add(f"Available remote access methods: {', '.join(access_methods)}")
+        if self.is_linux:
+            # Check systemd services for remote access
+            systemd = self.info.get("systemd_services", [])
+            has_vnc = any("vnc" in s.get("unit", "").lower() for s in systemd)
+            has_ssh = any("ssh" in s.get("unit", "").lower() for s in systemd)
+
+            if has_vnc:
+                access_methods.append("VNC")
+            if has_ssh:
+                access_methods.append("SSH")
+            else:
+                # Check if sshd is listening
+                has_ssh_port = any("22" in self._get_port_address(p) for p in ports)
+                if has_ssh_port:
+                    access_methods.append("SSH")
+
+            if not access_methods:
+                access_methods.append("SSH (if enabled)")
+
+            self._add(f"Available remote access methods: {', '.join(access_methods)}")
+            self._add()
+            self._add("### Access Methods")
+            self._add()
+            self._add("| Method | Port | Best For |")
+            self._add("|--------|------|----------|")
+            if has_vnc:
+                self._add("| VNC | 5900 | Desktop access |")
+            self._add("| SSH | 22 | Terminal access, scripts |")
+        else:
+            # Check for NoMachine
+            launchd = self.info.get("launchd_services", [])
+            has_nomachine = any("nomachine" in s.get("label", "").lower() for s in launchd)
+            has_ard = any("ARD" in p.get("process", "") for p in ports)
+
+            if has_nomachine:
+                access_methods.append("NoMachine (NX protocol)")
+            if has_ard:
+                access_methods.append("Apple Remote Desktop / Screen Sharing")
+            access_methods.append("SSH (if enabled)")
+
+            self._add(f"Available remote access methods: {', '.join(access_methods)}")
+            self._add()
+            self._add("### Access Methods")
+            self._add()
+            self._add("| Method | Port | Best For |")
+            self._add("|--------|------|----------|")
+            if has_nomachine:
+                self._add("| NoMachine | 4000 | Full desktop, development work |")
+            if has_ard:
+                self._add("| Screen Sharing | 5900 | Quick admin tasks |")
+            self._add("| SSH | 22 | Terminal access, scripts |")
+
+            if has_nomachine:
+                self._add()
+                self._add("### NoMachine Commands")
+                self._add()
+                self._add("```bash")
+                self._add("# Check NoMachine status")
+                self._add("launchctl list | grep nomachine")
+                self._add()
+                self._add("# Restart NoMachine")
+                self._add("/etc/NXServer/nxserver --restart")
+                self._add()
+                self._add("# View NoMachine logs")
+                self._add('tail -f /Library/Application\\ Support/NoMachine/var/log/nxserver.log')
+                self._add("```")
+
         self._add()
-
-        self._add("### Access Methods")
-        self._add()
-        self._add("| Method | Port | Best For |")
-        self._add("|--------|------|----------|")
-        if has_nomachine:
-            self._add("| NoMachine | 4000 | Full desktop, development work |")
-        if has_ard:
-            self._add("| Screen Sharing | 5900 | Quick admin tasks |")
-        self._add("| SSH | 22 | Terminal access, scripts |")
-        self._add()
-
-        if has_nomachine:
-            self._add("### NoMachine Commands")
-            self._add()
-            self._add("```bash")
-            self._add("# Check NoMachine status")
-            self._add("launchctl list | grep nomachine")
-            self._add()
-            self._add("# Restart NoMachine")
-            self._add("/etc/NXServer/nxserver --restart")
-            self._add()
-            self._add("# View NoMachine logs")
-            self._add('tail -f /Library/Application\\ Support/NoMachine/var/log/nxserver.log')
-            self._add("```")
-            self._add()
-
         self._add("---")
         self._add()
 
@@ -497,8 +748,13 @@ class OperationsRenderer:
         self._add()
         self._add("### Service Won't Start")
         self._add("```bash")
-        self._add("# Check logs for specific process")
-        self._add('log show --predicate \'process == "ServiceName"\' --last 1h')
+        if self.is_linux:
+            self._add("# Check service status and logs")
+            self._add("systemctl status <service_name>")
+            self._add("journalctl -u <service_name> --since '1 hour ago' --no-pager")
+        else:
+            self._add("# Check logs for specific process")
+            self._add('log show --predicate \'process == "ServiceName"\' --last 1h')
         self._add()
         self._add("# Check disk space")
         self._add("df -h")
@@ -515,21 +771,41 @@ class OperationsRenderer:
         self._add("# Top processes by memory")
         self._add("ps aux | sort -nrk 4 | head -10")
         self._add()
-        self._add("# Memory pressure")
-        self._add("memory_pressure")
-        self._add()
-        self._add("# System load")
-        self._add("sysctl -n vm.loadavg")
+        if self.is_linux:
+            self._add("# Memory info")
+            self._add("free -h")
+            self._add()
+            self._add("# System load")
+            self._add("uptime")
+        else:
+            self._add("# Memory pressure")
+            self._add("memory_pressure")
+            self._add()
+            self._add("# System load")
+            self._add("sysctl -n vm.loadavg")
         self._add("```")
         self._add()
-        self._add("### Application Crashes")
-        self._add("```bash")
-        self._add("# View recent crash reports")
-        self._add("ls -lt ~/Library/Logs/DiagnosticReports/ | head -10")
-        self._add()
-        self._add("# Read a crash report")
-        self._add("cat ~/Library/Logs/DiagnosticReports/AppName_*.crash | head -100")
-        self._add("```")
+        if self.is_linux:
+            self._add("### Failed Services")
+            self._add("```bash")
+            self._add("# List failed services")
+            self._add("systemctl --failed")
+            self._add()
+            self._add("# View journal for a failed service")
+            self._add("journalctl -u <service_name> -b --no-pager")
+            self._add()
+            self._add("# Reset a failed service")
+            self._add("sudo systemctl reset-failed <service_name>")
+            self._add("```")
+        else:
+            self._add("### Application Crashes")
+            self._add("```bash")
+            self._add("# View recent crash reports")
+            self._add("ls -lt ~/Library/Logs/DiagnosticReports/ | head -10")
+            self._add()
+            self._add("# Read a crash report")
+            self._add("cat ~/Library/Logs/DiagnosticReports/AppName_*.crash | head -100")
+            self._add("```")
         self._add()
         self._add("---")
         self._add()
@@ -566,14 +842,24 @@ class OperationsRenderer:
         self._add("### Network Commands")
         self._add()
         self._add("```bash")
-        self._add("# Show all interfaces")
-        self._add("ifconfig")
-        self._add()
-        self._add("# Show routing table")
-        self._add("netstat -rn")
-        self._add()
-        self._add("# DNS lookup")
-        self._add("scutil --dns")
+        if self.is_linux:
+            self._add("# Show all interfaces")
+            self._add("ip addr show")
+            self._add()
+            self._add("# Show routing table")
+            self._add("ip route show")
+            self._add()
+            self._add("# DNS info")
+            self._add("cat /etc/resolv.conf")
+        else:
+            self._add("# Show all interfaces")
+            self._add("ifconfig")
+            self._add()
+            self._add("# Show routing table")
+            self._add("netstat -rn")
+            self._add()
+            self._add("# DNS lookup")
+            self._add("scutil --dns")
         self._add()
         self._add("# Test connectivity")
         self._add("ping -c 4 8.8.8.8")
@@ -590,15 +876,27 @@ class OperationsRenderer:
         self._add()
 
         if ports:
-            self._add("| Process | User | Address |")
-            self._add("|---------|------|---------|")
-            for port in ports:
-                self._add(f"| {port.get('process', '')} | {port.get('user', '')} | {port.get('address', '')} |")
+            if self.is_linux:
+                self._add("| Process | PID | Address |")
+                self._add("|---------|-----|---------|")
+                for port in ports:
+                    process = port.get("process", "") or "unknown"
+                    pid = port.get("pid", "")
+                    address = self._get_port_address(port)
+                    self._add(f"| {process} | {pid} | {address} |")
+            else:
+                self._add("| Process | User | Address |")
+                self._add("|---------|------|---------|")
+                for port in ports:
+                    self._add(f"| {port.get('process', '')} | {port.get('user', '')} | {port.get('address', '')} |")
             self._add()
 
         self._add("```bash")
         self._add("# Refresh this list")
-        self._add("lsof -iTCP -sTCP:LISTEN -P -n | awk '{print $1, $3, $9}' | sort -u")
+        if self.is_linux:
+            self._add("sudo ss -tlnp")
+        else:
+            self._add("lsof -iTCP -sTCP:LISTEN -P -n | awk '{print $1, $3, $9}' | sort -u")
         self._add("```")
         self._add()
         self._add("---")
@@ -619,10 +917,15 @@ class OperationsRenderer:
             name = Path(path).name
             self._add(f"| {name} | `{path}` | {exists} |")
 
-        # Add standard locations
-        self._add("| Homebrew | `/opt/homebrew/` | - |")
-        self._add("| User LaunchAgents | `~/Library/LaunchAgents/` | - |")
-        self._add("| System LaunchDaemons | `/Library/LaunchDaemons/` | - |")
+        # Add standard platform-specific locations
+        if self.is_linux:
+            self._add("| systemd units | `/etc/systemd/system/` | - |")
+            self._add("| nginx config | `/etc/nginx/` | - |")
+            self._add("| crontab | `/etc/crontab` | - |")
+        else:
+            self._add("| Homebrew | `/opt/homebrew/` | - |")
+            self._add("| User LaunchAgents | `~/Library/LaunchAgents/` | - |")
+            self._add("| System LaunchDaemons | `/Library/LaunchDaemons/` | - |")
         self._add()
         self._add("---")
         self._add()
@@ -635,13 +938,21 @@ class OperationsRenderer:
         self._add("1. Home directory: `~`")
         self._add("2. SSH keys: `~/.ssh/`")
         self._add("3. Development projects: `~/Development/`")
-        self._add("4. Application preferences: `~/Library/Preferences/`")
-        self._add("5. Homebrew package list")
+        if self.is_linux:
+            self._add("4. System configuration: `/etc/`")
+            self._add("5. Package list: `dpkg --get-selections`")
+        else:
+            self._add("4. Application preferences: `~/Library/Preferences/`")
+            self._add("5. Homebrew package list")
         self._add()
         self._add("**Backup Commands:**")
         self._add("```bash")
-        self._add("# Export Homebrew packages")
-        self._add("brew bundle dump --file=~/Brewfile")
+        if self.is_linux:
+            self._add("# Export installed packages")
+            self._add("dpkg --get-selections > ~/package-list-$(date +%Y%m%d).txt")
+        else:
+            self._add("# Export Homebrew packages")
+            self._add("brew bundle dump --file=~/Brewfile")
         self._add()
         self._add("# Backup SSH keys")
         self._add("cp -r ~/.ssh /path/to/backup/ssh-$(date +%Y%m%d)/")
@@ -649,8 +960,9 @@ class OperationsRenderer:
         self._add("# Create compressed archive of home")
         self._add("tar -czf /path/to/backup/home-$(date +%Y%m%d).tar.gz -C ~ .")
         self._add()
-        self._add("# Time Machine backup (if configured)")
-        self._add("tmutil startbackup")
+        if not self.is_linux:
+            self._add("# Time Machine backup (if configured)")
+            self._add("tmutil startbackup")
         self._add("```")
         self._add()
         self._add("---")
@@ -668,21 +980,29 @@ class OperationsRenderer:
         partitions = self.info.get("disk", {}).get("partitions", [])
         for part in partitions:
             if "NTFS" in part.get("type", "") or "Windows" in part.get("type", ""):
-                issues.append({
-                    "title": f"External drive '{part.get('name', '')}' is NTFS formatted",
-                    "description": "Read-only by default on macOS without additional tools",
-                    "workaround": "Install ntfs-3g via Homebrew for write access, or reformat to APFS/exFAT"
-                })
+                if self.is_linux:
+                    issues.append({
+                        "title": f"External drive '{part.get('name', '')}' is NTFS formatted",
+                        "description": "May require ntfs-3g for full read/write access",
+                        "workaround": "Install ntfs-3g: `sudo apt install ntfs-3g`"
+                    })
+                else:
+                    issues.append({
+                        "title": f"External drive '{part.get('name', '')}' is NTFS formatted",
+                        "description": "Read-only by default on macOS without additional tools",
+                        "workaround": "Install ntfs-3g via Homebrew for write access, or reformat to APFS/exFAT"
+                    })
 
         # Check for high disk usage
         usage = self.info.get("disk", {}).get("usage", [])
         for u in usage:
-            cap = u.get("capacity", "0%").replace("%", "")
+            cap = u.get("capacity", "") or u.get("use_percent", "")
+            cap_num = cap.replace("%", "")
             try:
-                if int(cap) > 85:
+                if int(cap_num) > 85:
                     issues.append({
                         "title": f"High disk usage on {u.get('mount_point', '')}",
-                        "description": f"Currently at {u.get('capacity', '')} capacity",
+                        "description": f"Currently at {cap} capacity",
                         "workaround": "Review large files with `ncdu` or move data to external storage"
                     })
             except ValueError:
@@ -712,8 +1032,12 @@ class OperationsRenderer:
         self._add("- Created Operations.md from system profiling")
 
         hw = self.info.get("hardware", {})
-        if hw.get("model_name"):
-            self._add(f"- Documented hardware specs ({hw.get('model_name')}, {hw.get('chip', '')}, {hw.get('memory', '')})")
+        if self.is_linux:
+            if hw.get("hostname"):
+                self._add(f"- Documented hardware specs ({hw.get('hostname')}, {hw.get('cpu_model', '')}, {hw.get('memory_total', '')})")
+        else:
+            if hw.get("model_name"):
+                self._add(f"- Documented hardware specs ({hw.get('model_name')}, {hw.get('chip', '')}, {hw.get('memory', '')})")
 
         disk = self.info.get("disk", {})
         if disk.get("partitions"):
@@ -728,8 +1052,19 @@ class OperationsRenderer:
 
 
 def collect_system_info() -> dict:
-    """Collect system information and return as dictionary."""
-    collector = MacSystemInfoCollector()
+    """Collect system information using the appropriate platform collector."""
+    current_platform = platform.system().lower()
+
+    if current_platform == "linux":
+        from linux_system_info import LinuxSystemInfoCollector
+        collector = LinuxSystemInfoCollector()
+    elif current_platform == "darwin":
+        from mac_system_info import MacSystemInfoCollector
+        collector = MacSystemInfoCollector()
+    else:
+        print(f"ERROR: Unsupported platform: {current_platform}", file=sys.stderr)
+        sys.exit(1)
+
     info = collector.collect_all()
     return collector.to_dict(info)
 

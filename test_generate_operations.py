@@ -629,5 +629,297 @@ class TestGPGSigning(unittest.TestCase):
         Path(asc_path).unlink()
 
 
+class TestLinuxRendering(unittest.TestCase):
+    """Tests for Linux-specific rendering."""
+
+    def get_linux_info(self) -> dict:
+        """Return sample Linux system info for testing."""
+        return {
+            "platform": "linux",
+            "hardware": {
+                "hostname": "webserver",
+                "os_name": "Debian GNU/Linux 13 (trixie)",
+                "os_version": "13 (trixie)",
+                "kernel": "Linux 6.12.47+rpt-rpi-v8",
+                "architecture": "arm64",
+                "cpu_model": "Cortex-A72",
+                "cpu_cores": "",
+                "cpu_threads": "4",
+                "memory_total": "7.6Gi",
+                "memory_available": "7.4Gi",
+                "virtualization": "",
+            },
+            "disk": {
+                "partitions": [
+                    {
+                        "name": "mmcblk0p2",
+                        "size": "118.9G",
+                        "type": "part",
+                        "mountpoint": "/",
+                        "fstype": "ext4",
+                    }
+                ],
+                "usage": [
+                    {
+                        "filesystem": "/dev/mmcblk0p2",
+                        "size": "118G",
+                        "used": "5.8G",
+                        "available": "107G",
+                        "use_percent": "6%",
+                        "mount_point": "/",
+                    }
+                ],
+            },
+            "network": {
+                "hostname": "webserver",
+                "interfaces": [
+                    {
+                        "name": "eth0",
+                        "flags": "UP,BROADCAST,RUNNING,MULTICAST",
+                        "ipv4_address": "192.168.110.147",
+                    },
+                    {
+                        "name": "lo",
+                        "flags": "UP,LOOPBACK,RUNNING",
+                        "ipv4_address": "127.0.0.1",
+                    },
+                ],
+                "dns_resolvers": [],
+            },
+            "systemd_services": [
+                {
+                    "unit": "nginx.service",
+                    "load": "loaded",
+                    "active": "active",
+                    "sub": "running",
+                    "description": "A high performance web server and a reverse proxy server",
+                },
+                {
+                    "unit": "media-gallery.service",
+                    "load": "loaded",
+                    "active": "active",
+                    "sub": "running",
+                    "description": "Media Gallery Flask Application",
+                },
+                {
+                    "unit": "ssh.service",
+                    "load": "loaded",
+                    "active": "active",
+                    "sub": "running",
+                    "description": "OpenBSD Secure Shell server",
+                },
+            ],
+            "docker_containers": [],
+            "listening_ports": [
+                {
+                    "protocol": "tcp",
+                    "local_address": "0.0.0.0:22",
+                    "process": "sshd",
+                    "pid": "839",
+                },
+                {
+                    "protocol": "tcp",
+                    "local_address": "0.0.0.0:80",
+                    "process": "nginx",
+                    "pid": "855",
+                },
+                {
+                    "protocol": "tcp",
+                    "local_address": "127.0.0.1:5000",
+                    "process": "python",
+                    "pid": "828",
+                },
+            ],
+            "cron_jobs": [],
+            "config_files": [
+                {"path": "/home/pi/.bashrc", "exists": True, "size": 100, "content_preview": ""},
+                {"path": "/home/pi/.gitconfig", "exists": True, "size": 50, "content_preview": ""},
+            ],
+            "collection_timestamp": "2026-04-09T15:44:00",
+            "errors": [],
+        }
+
+    def test_detects_linux_platform(self):
+        """Test that Linux platform is detected from platform field."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        self.assertTrue(renderer.is_linux)
+
+    def test_detects_linux_from_systemd(self):
+        """Test that Linux is detected from systemd_services when platform field missing."""
+        info = self.get_linux_info()
+        del info["platform"]
+        renderer = OperationsRenderer(info)
+        self.assertTrue(renderer.is_linux)
+
+    def test_detects_macos_by_default(self):
+        """Test that macOS is detected when homebrew_services present."""
+        info = {"homebrew_services": [{"name": "test"}]}
+        renderer = OperationsRenderer(info)
+        self.assertFalse(renderer.is_linux)
+
+    def test_linux_header(self):
+        """Test that Linux header uses correct fields."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("# Operations Guide - webserver", output)
+        self.assertIn("Debian GNU/Linux 13", output)
+        self.assertIn("7.6Gi RAM", output)
+        self.assertNotIn("macOS", output)
+
+    def test_linux_quick_reference_uses_systemctl(self):
+        """Test that Linux quick reference uses systemctl, not brew."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("systemctl", output)
+        self.assertIn("journalctl", output)
+        self.assertNotIn("brew services", output)
+        self.assertNotIn("launchctl", output)
+
+    def test_linux_renders_systemd_services(self):
+        """Test that systemd services are rendered."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("## Systemd Services", output)
+        self.assertIn("nginx.service", output)
+        self.assertIn("media-gallery.service", output)
+        self.assertIn("ssh.service", output)
+
+    def test_linux_listening_ports_uses_local_address(self):
+        """Test that Linux ports render with local_address field."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("## Listening Ports", output)
+        self.assertIn("0.0.0.0:80", output)
+        self.assertIn("0.0.0.0:22", output)
+        self.assertIn("127.0.0.1:5000", output)
+        self.assertIn("nginx", output)
+        self.assertIn("sshd", output)
+
+    def test_linux_architecture_shows_components(self):
+        """Test that architecture table includes detected services."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("## Architecture Overview", output)
+        self.assertIn("| Component | Port | Purpose | Type |", output)
+        # nginx on port 80 should appear
+        self.assertIn("nginx", output)
+        self.assertIn("80", output)
+        self.assertIn("Web server", output)
+
+    def test_linux_hardware_fields(self):
+        """Test that Linux hardware uses correct field names."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("Cortex-A72", output)
+        self.assertIn("arm64", output)
+        self.assertIn("7.6Gi", output)
+
+    def test_linux_disk_shows_mountpoint(self):
+        """Test that Linux disk partitions show mountpoint."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("Mount Point", output)
+        self.assertIn("ext4", output)
+
+    def test_linux_config_locations(self):
+        """Test that Linux config locations use Linux paths."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("/etc/systemd/system/", output)
+        self.assertIn("/etc/nginx/", output)
+        self.assertNotIn("LaunchAgents", output)
+        self.assertNotIn("/opt/homebrew", output)
+
+    def test_linux_troubleshooting(self):
+        """Test that Linux troubleshooting uses journalctl."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("journalctl", output)
+        self.assertIn("systemctl --failed", output)
+        self.assertNotIn("memory_pressure", output)
+        self.assertNotIn("DiagnosticReports", output)
+
+    def test_linux_backup_commands(self):
+        """Test that Linux backup uses Linux-specific commands."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("dpkg --get-selections", output)
+        self.assertNotIn("brew bundle dump", output)
+        self.assertNotIn("tmutil", output)
+
+    def test_linux_network_commands(self):
+        """Test that Linux network section uses ip command."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("ip addr show", output)
+        self.assertIn("ip route show", output)
+        self.assertNotIn("scutil --dns", output)
+
+    def test_linux_ss_refresh_command(self):
+        """Test that Linux listening ports suggest ss, not lsof."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("sudo ss -tlnp", output)
+        self.assertNotIn("lsof -iTCP", output)
+
+    def test_linux_remote_access_detects_ssh(self):
+        """Test that SSH is detected from systemd services."""
+        info = self.get_linux_info()
+        renderer = OperationsRenderer(info)
+        output = renderer.render()
+
+        self.assertIn("## Remote Access", output)
+        self.assertIn("SSH", output)
+
+
+class TestLinuxPlatformDetection(unittest.TestCase):
+    """Tests for platform detection heuristics."""
+
+    def test_explicit_platform_linux(self):
+        """Test explicit platform=linux detection."""
+        renderer = OperationsRenderer({"platform": "linux"})
+        self.assertTrue(renderer.is_linux)
+
+    def test_explicit_platform_darwin(self):
+        """Test explicit platform=darwin detection."""
+        renderer = OperationsRenderer({"platform": "darwin"})
+        self.assertFalse(renderer.is_linux)
+
+    def test_kernel_heuristic(self):
+        """Test detection from kernel string."""
+        renderer = OperationsRenderer({"hardware": {"kernel": "Linux 6.1.0"}})
+        self.assertTrue(renderer.is_linux)
+
+    def test_empty_data_defaults_macos(self):
+        """Test that empty data defaults to macOS (backwards compatibility)."""
+        renderer = OperationsRenderer({})
+        self.assertFalse(renderer.is_linux)
+
+
 if __name__ == "__main__":
     unittest.main()

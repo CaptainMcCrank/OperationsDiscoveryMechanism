@@ -126,6 +126,7 @@ class SystemInfo:
     listening_ports: list = field(default_factory=list)
     cron_jobs: list = field(default_factory=list)
     config_files: list = field(default_factory=list)
+    platform: str = "linux"
     collection_timestamp: str = ""
     errors: list = field(default_factory=list)
 
@@ -462,10 +463,22 @@ class LinuxSystemInfoCollector:
         return containers
 
     def collect_listening_ports(self) -> list[dict]:
-        """Collect listening TCP/UDP ports using ss."""
+        """Collect listening TCP/UDP ports using ss.
+
+        Tries sudo ss first for full process visibility (processes owned
+        by other users like root/www-data are hidden without privileges).
+        Falls back to unprivileged ss if sudo is unavailable.
+        """
+        # Try sudo first — without it, ss only shows processes owned by the current user
         returncode, stdout, stderr = self.runner.run([
-            "ss", "-tlnp"
+            "sudo", "-n", "ss", "-tlnp"
         ])
+
+        if returncode != 0:
+            # Fall back to unprivileged ss (partial process info)
+            returncode, stdout, stderr = self.runner.run([
+                "ss", "-tlnp"
+            ])
 
         if returncode != 0:
             self.errors.append(f"ss failed: {stderr}")
@@ -473,14 +486,14 @@ class LinuxSystemInfoCollector:
 
         ports = []
         lines = stdout.strip().splitlines()
-        
+
         # Skip header
         for line in lines[1:]:
             parts = line.split()
             if len(parts) >= 5:
                 local_addr = parts[3]
                 process_info = parts[5] if len(parts) > 5 else ""
-                
+
                 # Parse process info like users:(("sshd",pid=1234,fd=3))
                 process = ""
                 pid = ""
@@ -488,7 +501,7 @@ class LinuxSystemInfoCollector:
                 if match:
                     process = match.group(1)
                     pid = match.group(2)
-                
+
                 ports.append(asdict(ListeningPort(
                     protocol="tcp",
                     local_address=local_addr,
